@@ -76,8 +76,9 @@ const verifyAdmin = async (req, res, next) => {
  })
 
 
-app.get("/user/admin/:email" , verifyToken ,async (req, res) =>{
+app.get("/users/admin/:email" , verifyToken,async (req, res) =>{
    const email =req.params.email;
+   console.log(email);
    if(email !== req.decoded.eamil ) {
     return res.status(403).send({message:"unauthorzied access" })
    }
@@ -132,15 +133,32 @@ const result = await userCollection.updateOne(filter,updateDoc);
 
 
 // menu related api 
-
+  
     app.get("/menu" , async(req, res) => {
         const result =await menuCollection.find().toArray();
         res.send(result)
+        
     })
+    // data  post database now
+app.post("/menu" ,verifyToken, verifyAdmin, async (req, res) =>{
+  const item = req.body;
+  const result = await menuCollection.insertOne(item);
+  res.send(result)
+})
+
+// menu deleted
+app.delete("/menu/:id" ,async (req, res) =>{
+  const id = req.params.id
+  const query = {id: (id)}
+  const result = await menuCollection.deleteOne(query);
+  res.send(result); 
+})
+
     app.get('/review' , async(req, res ) =>{
       const result = await reviewCollection.find().toArray()
       res.send(result)
     }) 
+
 // carts collection
 
 // cart colection data load
