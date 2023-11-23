@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
+require('dotenv').config()
 const app = express();
 const jwt = require("jsonwebtoken")
+const stripe =require('stripe')(process.env.STRIPE_SECRET_KEY)
 const port = process.env.PORT || 5000;
-require('dotenv').config()
+
 
 // middle were
 
@@ -25,13 +27,17 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
 
-    const menuCollection = client.db('bistroDB').collection('menu')
-   const reviewCollection = client.db("bistroDB").collection("review")
-   const cartCollection = client.db("bistroDB" ) .collection("carts")
-   const userCollection = client.db("bistroDB" ) .collection("users")
+        const menuCollection = client.db('bistroDB').collection('menu')
+        const reviewCollection = client.db("bistroDB").collection("review")
+        const cartCollection = client.db("bistroDB" ) .collection("carts")
+        const userCollection = client.db("bistroDB" ) .collection("users")
+        const paymentCollection = client.db("bistroDB").collection("payments");
+ 
+
+
 
 // jwt related api
 
@@ -76,13 +82,13 @@ const verifyAdmin = async (req, res, next) => {
  })
 
 
-app.get("/users/admin/:email" , verifyToken,async (req, res) =>{
-   const email =req.params.email;
-   console.log(email);
-   if(email !== req.decoded.eamil ) {
+app.get("/users/admin/:email" , verifyToken,   async (req, res) =>{
+  //  const email =req.params.email;
+  //  console.log(email);
+   if(! req.decoded.email ) {
     return res.status(403).send({message:"unauthorzied access" })
    }
-   const query  = {email : email };
+   const query  = {email : req.decoded.email };
    const user = await userCollection.findOne(query)
    let admin = false;
    if(user){
@@ -147,12 +153,43 @@ app.post("/menu" ,verifyToken, verifyAdmin, async (req, res) =>{
 })
 
 // menu deleted
+
 app.delete("/menu/:id" ,async (req, res) =>{
   const id = req.params.id
-  const query = {id: (id)}
+  const query = {_id: new ObjectId(id)} /// new object id na ata 
   const result = await menuCollection.deleteOne(query);
   res.send(result); 
 })
+
+// update related 
+
+app.get("/menu/:id" , async (req, res) =>{
+  const id = req.params.id;
+  const query = {_id: (id) }
+  const result = await menuCollection.findOne(query);
+  res.send(result)  
+  
+})
+
+
+app.patch("/menu/:id" , async (req, res) =>{
+  const  item = req.body;
+  const id =  req.params.id;
+  const filter = {_id: (id)}
+  const updateDoc = {
+     $set:{
+      name: item.name,
+      category: item.category,
+      price: item.price,
+      recipe: item.recipe,
+      image: item.image
+     }
+  } 
+  const result = await menuCollection.updateOne(filter,updateDoc)
+  res.send(result);
+})
+
+// review related
 
     app.get('/review' , async(req, res ) =>{
       const result = await reviewCollection.find().toArray()
@@ -172,7 +209,6 @@ app.get("/carts", async (req, res) =>{
 
  app.post("/carts" ,async(req, res) =>{
   const cartItem = req.body;
-  console.log(cartItem)
   const result = await cartCollection.insertOne(cartItem)
   res.send(result)
  })
@@ -183,11 +219,122 @@ app.delete("/carts/:id" , async(req, res) =>{
    const query ={_id : new ObjectId(id)}
    const result  = await cartCollection.deleteOne(query)
    res.send(result)
-} )
+})
     
+    // payment intent 
+  app.post("/create-payment-intent", async (req, res) =>{
+    const {price}  = req.body;
+    console.log(price);
+    const amount = parseInt(price * 100);
+   console.log(amount , " amount inside the intent");
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount,
+      currency:"usd",
+      payment_method_types: ["card"]
+
+    });
+    console.log(paymentIntent.client_secret);
+    res.send({
+      clientSecret: paymentIntent.client_secret
+    }) 
+    // paymnet 
+  app.get("/payments/:email", verifyToken, async(req, res) =>{
+   const query = {email : req.params.email}
+   if(req.params.email !== req.decoded.email){
+    return res.status(403).send({message:"forbidden access"}); 
+   }
+   const result= await paymentCollection.find(query).toArray();
+   res.send(result);
+  })
+
+
+
+    app.post("/payments", async (req, res) =>{
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+      // carefully delete each item form the cart
+      console.log("payment info" , payment);
+      const query ={_id:{
+        $in: payment.cartIds.map(id => new ObjectId(id))
+      }}
+      const deleteResult = await cartCollection.deleteMany(query);
+    res.send({paymentResult , deleteResult})
+    })
+  }) 
+
+  // stats or anaylitics
+app.get("/admin-stats"  , async (req , res) =>{
+  const users = await userCollection.estimatedDocumentCount();
+  const menuItems = await menuCollection.estimatedDocumentCount();
+  const order = await paymentCollection.estimatedDocumentCount()
+
+
+  // this is not best the  way
+  // const payments = await paymentCollection.find().toArray();
+  // const revenue = payments.reduce((total,payment) => total + payment.price  ,0   ) 
+const result = await paymentCollection.aggregate([
+  {
+    $group:{
+      _id: null,
+      totalRevenue: {
+        $sum: "$price"
+      }
+    }
+  }
+]).toArray();
+const revenue = result.length > 0 ? result [0].totalRevenue : 0;
+  res.send({users, menuItems, order , revenue })
+})
+
+// order status 
+/**
+ * ------------------
+ *  NON-Effeicient way
+ * ------------------------
+ * 1. load all the payments
+ * 2. for every menuItems (which is an array ) , go find the item frm menu collection
+ * 3. for every item in the menu collection that you found from a payment entry (document)
+ * 
+ */
+
+app.get("/order-satas" , async (req, res) =>{
+  const result = await paymentCollection.aggregate([
+  {
+    $unwind: "$menuItemId"
+  },
+  {
+    $lookup:{
+      from: "menu",
+      localField : "menuItemId",
+      foreignField: "_id",
+      as:"menuItems"
+    }
+  },
+  {
+    $unwind:"$menuItems"
+  },
+  {
+    $group: {
+      _id:"$menuItems.category",
+      quantity: {$sum : 1},
+      revenue:{$sum : "$menuItems.price"}
+    }
+  },
+  {
+    $project:{
+      _id:0,
+      category:"$_id",
+      quantity:"$quantity",
+      revenue:"$revenue"
+    }
+  }
+  ]).toArray();
+  res.send(result);
+})
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -201,3 +348,15 @@ app.get('/' , async(req, res) =>{
 app.listen(port , () => {
     console.log( `signel crud  sevber is running port ${port}` )
 })
+/**
+ * --------------------------------------
+ *       NAMPING CONVENTION
+ * --------------------------------------
+ * 
+ * app.get("/users")
+ * app.get("/users/:id")
+ * app.post("/users")
+ * app.put("/users/:id")
+ * app.patch("/users/:id")
+ * app.delete("/users/:id")
+ */
